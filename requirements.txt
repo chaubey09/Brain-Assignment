@@ -1,5 +1,5 @@
-streamlit
+streamlit>=1.36,<1.40
 tensorflow==2.16.1
-pillow
-numpy
-matplotlib
+numpy>=1.26,<2.0
+pillow>=10.3
+matplotlib>=3.8
