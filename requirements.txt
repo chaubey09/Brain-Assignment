@@ -1,5 +1,14 @@
-streamlit>=1.36,<1.40
-tensorflow==2.16.1
-numpy>=1.26,<2.0
+# Streamlit UI
+streamlit==1.39.0
+
+# TensorFlow (CPU build) + friends
+tensorflow-cpu==2.16.1
+tensorflow-io-gcs-filesystem==0.36.0
+numpy>=1.26.4,<2.0
+h5py>=3.10,<3.12
+protobuf<5
+typing-extensions>=4.8,<4.10
+
+# Imaging & plots
 pillow>=10.3
 matplotlib>=3.8
