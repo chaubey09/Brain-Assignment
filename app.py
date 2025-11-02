@@ -1,15 +1,17 @@
-# streamlit_app.py
+# app.py
 # Brain MRI — Alzheimer’s Stage Classifier (EffNetV2-B0, 300x300)
 # Expects these files in the SAME folder as this app:
 #   - brain_effv2b0_infer.keras   (preferred)  OR  brain_savedmodel/ (fallback)
 #   - labels.json
 
 from pathlib import Path
+import json
 import numpy as np
 from PIL import Image
 
 import streamlit as st
 import matplotlib.pyplot as plt
+
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as v2_preproc
@@ -27,6 +29,7 @@ st.title("🧠 Brain MRI — Alzheimer’s Stage Classifier")
 # ---------- utilities ----------
 def load_labels(path: Path):
     lab = json.loads(path.read_text(encoding="utf-8"))
+    # support {"0":"CN","1":"MCI",...} or ["CN","MCI",...]
     return [lab[str(i)] if str(i) in lab else lab[i] for i in range(len(lab))]
 
 def preprocess_pil(img: Image.Image) -> np.ndarray:
@@ -61,7 +64,7 @@ def grad_cam(keras_model, img: Image.Image, alpha=0.40):
         class_idx = tf.argmax(preds[0])
         loss = preds[:, class_idx]
     grads = tape.gradient(loss, conv_out)[0]
-    weights = tf.reduce_mean(grads, axis=(0,1))
+    weights = tf.reduce_mean(grads, axis=(0, 1))
     cam = tf.reduce_sum(tf.multiply(weights, conv_out[0]), axis=-1)
     cam = tf.maximum(cam, 0) / (tf.reduce_max(cam) + 1e-8)
     cam = tf.image.resize(cam[..., None], (IMG_SZ, IMG_SZ)).numpy().squeeze()
@@ -71,8 +74,32 @@ def grad_cam(keras_model, img: Image.Image, alpha=0.40):
     overlay = np.clip((1 - alpha) * base + alpha * heat, 0, 1)
     return (overlay * 255).astype(np.uint8)
 
+def to_display_rgb(pil: Image.Image) -> Image.Image:
+    """Convert any PIL image (incl. 16-bit, float, palette, CMYK) to 8-bit RGB for safe Streamlit display."""
+    # 16-bit / integer or float grayscale → normalize to 0-255 uint8
+    if pil.mode in ("I;16", "I", "F"):
+        arr = np.array(pil, dtype=np.float32)
+        # Robust min-max scale
+        mn = float(np.nanmin(arr)) if np.isfinite(arr).any() else 0.0
+        arr = arr - mn
+        mx = float(np.nanmax(arr))
+        if mx > 0:
+            arr = arr / mx
+        arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
+        return Image.fromarray(arr, mode="L").convert("RGB")
+    # Palette / alpha / CMYK / etc.
+    if pil.mode not in ("RGB", "RGBA", "L"):
+        return pil.convert("RGB")
+    if pil.mode == "L":
+        return pil.convert("RGB")
+    if pil.mode == "RGBA":
+        # drop alpha onto white background
+        bg = Image.new("RGB", pil.size, (255, 255, 255))
+        bg.paste(pil, mask=pil.split()[-1])
+        return bg
+    return pil  # already RGB
+
 # ---------- load model & labels ----------
-import json
 try:
     class_names = load_labels(LABELS_PATH)
 except Exception as e:
@@ -90,6 +117,7 @@ try:
     elif (SAVEDMODEL_DIR / "saved_model.pb").exists():
         infer = tf.saved_model.load(str(SAVEDMODEL_DIR))
         serving = infer.signatures["serving_default"]
+
         class Wrap:
             def predict(self, x, verbose=0):
                 out = serving(tf.constant(x))
@@ -97,12 +125,15 @@ try:
             @property
             def layers(self):  # for Grad-CAM guard
                 return []
+
         model = Wrap()
         is_keras = False
         st.success("Loaded SavedModel.")
     else:
-        raise FileNotFoundError("No model found. Place 'brain_effv2b0_infer.keras' "
-                                "or 'brain_savedmodel/' next to this file.")
+        st.write("Repo contents:", [p.name for p in APP_DIR.iterdir()])
+        raise FileNotFoundError(
+            "No model found. Place 'brain_effv2b0_infer.keras' or 'brain_savedmodel/' next to this file."
+        )
 except Exception as e:
     st.error(f"Model load error: {e}")
     st.stop()
@@ -112,13 +143,19 @@ st.markdown("---")
 
 # ---------- UI: upload & predict ----------
 show_cam = st.checkbox("Show Grad-CAM (only for .keras models)", value=True)
-file = st.file_uploader("Upload an MRI image (JPG/PNG)", type=["jpg", "jpeg", "png"])
+file = st.file_uploader("Upload an MRI image (JPG/PNG/TIFF)", type=["jpg", "jpeg", "png", "tif", "tiff"])
 
 if file:
-    img = Image.open(file)
-    st.image(img, caption="Input", use_container_width=True)
+    raw_img = Image.open(file)
+    disp_img = to_display_rgb(raw_img)
 
-    probs = predict_one(model, img)[0]
+    # Safe display (Cloud sometimes raises TypeError on odd modes)
+    try:
+        st.image(disp_img, caption="Input", use_container_width=True)
+    except TypeError:
+        st.image(np.array(disp_img), caption="Input", use_container_width=True)
+
+    probs = predict_one(model, raw_img)[0]
     top = int(np.argmax(probs))
     st.subheader(f"Predicted Stage: **{class_names[top]}** (confidence {probs[top]:.3f})")
 
@@ -131,6 +168,6 @@ if file:
     st.pyplot(fig, use_container_width=True)
 
     if show_cam and is_keras:
-        overlay = grad_cam(model, img)
+        overlay = grad_cam(model, raw_img)
         if overlay is not None:
             st.image(overlay, caption="Grad-CAM overlay", use_container_width=True)
