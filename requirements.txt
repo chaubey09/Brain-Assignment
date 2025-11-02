@@ -1,15 +1,5 @@
-# Streamlit UI
 streamlit==1.39.0
-
-# TensorFlow (works on Python 3.13 in Streamlit Cloud)
 tensorflow==2.20.0
-
-# Pins that play nicely with TF 2.20
-numpy>=1.26.4,<2.0
-h5py>=3.10,<3.12
-protobuf<6
-typing-extensions>=4.8,<4.12
-
-# Imaging & plots
-pillow>=10.3
-matplotlib>=3.8
+numpy>=2.1.1
+pillow>=10.4
+matplotlib>=3.9
