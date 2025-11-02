@@ -1,11 +1,17 @@
 # app.py
 # Brain MRI — Alzheimer’s Stage Classifier (EffNetV2-B0, 300x300)
-# Expects these files in the SAME folder as this app:
+# Put these next to this file:
 #   - brain_effv2b0_infer.keras   (preferred)  OR  brain_savedmodel/ (fallback)
 #   - labels.json
+#
+# Optional: set st.secrets["MODEL_URL"] to a direct URL of the .keras file.
+# If present, the app will download the model at first run.
 
 from pathlib import Path
 import json
+import os
+import urllib.request
+
 import numpy as np
 from PIL import Image
 
@@ -76,40 +82,52 @@ def grad_cam(keras_model, img: Image.Image, alpha=0.40):
 
 def to_display_rgb(pil: Image.Image) -> Image.Image:
     """Convert any PIL image (incl. 16-bit, float, palette, CMYK) to 8-bit RGB for safe Streamlit display."""
-    # 16-bit / integer or float grayscale → normalize to 0-255 uint8
-    if pil.mode in ("I;16", "I", "F"):
+    if pil.mode in ("I;16", "I", "F"):  # 16-bit/float grayscale
         arr = np.array(pil, dtype=np.float32)
-        # Robust min-max scale
-        mn = float(np.nanmin(arr)) if np.isfinite(arr).any() else 0.0
-        arr = arr - mn
-        mx = float(np.nanmax(arr))
-        if mx > 0:
-            arr = arr / mx
+        if np.isfinite(arr).any():
+            arr = arr - float(np.nanmin(arr))
+            mx = float(np.nanmax(arr))
+            if mx > 0:
+                arr = arr / mx
         arr = (arr * 255.0).clip(0, 255).astype(np.uint8)
         return Image.fromarray(arr, mode="L").convert("RGB")
-    # Palette / alpha / CMYK / etc.
-    if pil.mode not in ("RGB", "RGBA", "L"):
-        return pil.convert("RGB")
-    if pil.mode == "L":
-        return pil.convert("RGB")
     if pil.mode == "RGBA":
-        # drop alpha onto white background
         bg = Image.new("RGB", pil.size, (255, 255, 255))
         bg.paste(pil, mask=pil.split()[-1])
         return bg
-    return pil  # already RGB
+    if pil.mode in ("RGB", "L"):
+        return pil.convert("RGB")
+    return pil.convert("RGB")
 
-# ---------- load model & labels ----------
+def ensure_model_present():
+    """Ensure either .keras or SavedModel exists; optionally download .keras via secrets URL."""
+    if KERAS_PATH.exists() or (SAVEDMODEL_DIR / "saved_model.pb").exists():
+        return
+    model_url = st.secrets.get("MODEL_URL")
+    if model_url:
+        KERAS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with st.spinner("Downloading model…"):
+            urllib.request.urlretrieve(model_url, KERAS_PATH)
+    # show contents for debugging if still missing
+    if not KERAS_PATH.exists() and not (SAVEDMODEL_DIR / "saved_model.pb").exists():
+        st.write("App folder contents:", sorted(p.name for p in APP_DIR.iterdir()))
+        raise FileNotFoundError(
+            "No model found. Add 'brain_effv2b0_infer.keras' or 'brain_savedmodel/' next to app.py "
+            "or set st.secrets['MODEL_URL'] to a direct .keras download link."
+        )
+
+# ---------- load labels ----------
 try:
     class_names = load_labels(LABELS_PATH)
 except Exception as e:
     st.error(f"Could not read labels.json: {e}")
     st.stop()
 
-# Try .keras first (needs exact custom object key used during save),
-# else fall back to SavedModel.
+# ---------- ensure model + load ----------
 try:
+    ensure_model_present()
     if KERAS_PATH.exists():
+        # NB: custom_objects key must match what you used when saving; safe to alias preprocess
         model = load_model(str(KERAS_PATH),
                            custom_objects={"custom>effv2_preproc": v2_preproc})
         is_keras = True
@@ -123,17 +141,15 @@ try:
                 out = serving(tf.constant(x))
                 return next(iter(out.values())).numpy()
             @property
-            def layers(self):  # for Grad-CAM guard
+            def layers(self):  # prevent Grad-CAM usage on SavedModel
                 return []
 
         model = Wrap()
         is_keras = False
         st.success("Loaded SavedModel.")
     else:
-        st.write("Repo contents:", [p.name for p in APP_DIR.iterdir()])
-        raise FileNotFoundError(
-            "No model found. Place 'brain_effv2b0_infer.keras' or 'brain_savedmodel/' next to this file."
-        )
+        # unreachable because ensure_model_present would have raised, but keep for safety
+        raise FileNotFoundError("Model not found.")
 except Exception as e:
     st.error(f"Model load error: {e}")
     st.stop()
@@ -155,7 +171,12 @@ if file:
     except TypeError:
         st.image(np.array(disp_img), caption="Input", use_container_width=True)
 
-    probs = predict_one(model, raw_img)[0]
+    try:
+        probs = predict_one(model, raw_img)[0]
+    except Exception as e:
+        st.error(f"Inference error: {e}")
+        st.stop()
+
     top = int(np.argmax(probs))
     st.subheader(f"Predicted Stage: **{class_names[top]}** (confidence {probs[top]:.3f})")
 
