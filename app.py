@@ -1,18 +1,22 @@
-# streamlit_app.py
+# app.py
 # Brain MRI — Alzheimer’s Stage Classifier (EffNetV2-B0, 300x300)
 # Expects these files in the SAME folder as this app:
 #   - brain_effv2b0_infer.keras   (preferred)  OR  brain_savedmodel/ (fallback)
 #   - labels.json
 
+import os, io, json
 from pathlib import Path
-import numpy as np
-from PIL import Image
 
+import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
+from PIL import Image
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as v2_preproc
+
+# ---- quiet TF logs (Cloud friendlier) ----
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 # ---------- constants ----------
 APP_DIR = Path(__file__).parent.resolve()
@@ -27,6 +31,7 @@ st.title("🧠 Brain MRI — Alzheimer’s Stage Classifier")
 # ---------- utilities ----------
 def load_labels(path: Path):
     lab = json.loads(path.read_text(encoding="utf-8"))
+    # normalize to list index->name
     return [lab[str(i)] if str(i) in lab else lab[i] for i in range(len(lab))]
 
 def preprocess_pil(img: Image.Image) -> np.ndarray:
@@ -72,7 +77,6 @@ def grad_cam(keras_model, img: Image.Image, alpha=0.40):
     return (overlay * 255).astype(np.uint8)
 
 # ---------- load model & labels ----------
-import json
 try:
     class_names = load_labels(LABELS_PATH)
 except Exception as e:
@@ -83,6 +87,7 @@ except Exception as e:
 # else fall back to SavedModel.
 try:
     if KERAS_PATH.exists():
+        # IMPORTANT: your .keras contains a registered Lambda named "custom>effv2_preproc"
         model = load_model(str(KERAS_PATH),
                            custom_objects={"custom>effv2_preproc": v2_preproc})
         is_keras = True
@@ -110,15 +115,27 @@ except Exception as e:
 st.caption("Classes: " + " | ".join(class_names))
 st.markdown("---")
 
-# ---------- UI: upload & predict ----------
+# ---------- UI: upload & predict (robust on Streamlit Cloud) ----------
 show_cam = st.checkbox("Show Grad-CAM (only for .keras models)", value=True)
-file = st.file_uploader("Upload an MRI image (JPG/PNG)", type=["jpg", "jpeg", "png"])
+uploaded = st.file_uploader("Upload an MRI image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
-if file:
-    img = Image.open(file)
-    st.image(img, caption="Input", use_container_width=True)
+if uploaded is not None:
+    # Robust read for Cloud: use bytes → PIL → NumPy for st.image
+    try:
+        data = uploaded.getvalue()
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception as e:
+        st.error(f"Could not open image: {e}")
+        st.stop()
 
-    probs = predict_one(model, img)[0]
+    st.image(np.array(img), caption="Input", use_container_width=True)
+
+    try:
+        probs = predict_one(model, img)[0]
+    except Exception as e:
+        st.error(f"Inference failed: {e}")
+        st.stop()
+
     top = int(np.argmax(probs))
     st.subheader(f"Predicted Stage: **{class_names[top]}** (confidence {probs[top]:.3f})")
 
@@ -134,3 +151,5 @@ if file:
         overlay = grad_cam(model, img)
         if overlay is not None:
             st.image(overlay, caption="Grad-CAM overlay", use_container_width=True)
+    elif show_cam and not is_keras:
+        st.caption("Grad-CAM is only available when loading the .keras model.")
